@@ -1,0 +1,14 @@
+# Compiled binaries
+hashproj
+
+# Test files
+test.txt
+*.bin
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
