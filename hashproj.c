@@ -238,6 +238,9 @@ static void *heap_start = NULL;
 // Pointer to the head of the free list
 static node_t *free_list = NULL;
 
+// Pointer to track where we last searched for allocation
+static node_t *last_search = NULL;
+
 // Flag to track initialization
 static int heap_initialized = 0;
 
@@ -256,18 +259,21 @@ size_t round_up_size(size_t size) {
 ------------------------------------------------------------------- */
 void initialize_heap(void) {
     heap_start = init_umem();
-    
+
     if (heap_start == NULL) {
         fprintf(stderr, "Failed to initialize heap\n");
         exit(1);
     }
-    
+
     // Create one large free block covering the entire region
     free_list = (node_t *)heap_start;
     // The size is total space minus the node_t header itself
     free_list->size = UMEM_SIZE - sizeof(node_t);
     free_list->next = NULL;
-    
+
+    // Reset search pointer
+    last_search = NULL;
+
     heap_initialized = 1;
 }
 
@@ -284,48 +290,60 @@ void *umalloc(size_t size) {
     if (!heap_initialized) {
         initialize_heap();
     }
-    
+
     // Handle zero-size requests
     if (size == 0) {
         return NULL;
     }
-    
+
     // Round up for alignment
     size_t aligned_size = round_up_size(size);
-    
-    // Search the free list for a block large enough
-    node_t *current = free_list;
+
+    // Start search from last position, or from head if first allocation
+    node_t *start = last_search ? last_search : free_list;
+    node_t *current = start;
     node_t *prev = NULL;
-    
+
+    // Track if we've wrapped around
+    int wrapped = 0;
+
+    // Find previous node for start position
+    if (current != free_list) {
+        node_t *p = free_list;
+        while (p != NULL && p->next != current) {
+            p = p->next;
+        }
+        prev = p;
+    }
+
     while (current != NULL) {
         // Check if this free block has enough space
-        // We need at least aligned_size bytes in the payload
-        // Cast to size_t to avoid signed/unsigned comparison warning
         if ((size_t)current->size >= aligned_size) {
             // Found a suitable block!
-            
+
             // Calculate how much space would be left after allocation
             size_t remaining = current->size - aligned_size;
-            
+
+            // Update last_search to continue from here next time
+            last_search = current->next;
+
             // Decide whether to split the block
-            // Only split if remaining space can hold another node_t plus some data
             if (remaining >= sizeof(node_t) + 16) {
                 // SPLIT THE BLOCK
-                
+
                 // Convert current to an allocated block
                 header_t *alloc_header = (header_t *)current;
                 alloc_header->size = aligned_size;
                 alloc_header->magic = MAGIC;
-                
+
                 // Create a new free block from the leftover space
-                // New free block starts right after our allocated payload
                 void *new_free_addr = (char *)current + sizeof(header_t) + aligned_size;
                 node_t *new_free = (node_t *)new_free_addr;
-                
+
                 // The new free block's payload is what's left
                 new_free->size = remaining - sizeof(node_t);
                 new_free->next = current->next;
-                
+
                 // Update free list
                 if (prev == NULL) {
                     // We split the head of the list
@@ -334,18 +352,23 @@ void *umalloc(size_t size) {
                     // We split a middle/end block
                     prev->next = new_free;
                 }
-                
+
+                // Update last_search if it would point to freed memory
+                if (last_search == current->next) {
+                    last_search = new_free;
+                }
+
                 // Return pointer to the payload
                 return (void *)((char *)alloc_header + sizeof(header_t));
-                
+
             } else {
                 // DON'T SPLIT - use entire block
-                
+
                 // Convert to allocated block
                 header_t *alloc_header = (header_t *)current;
                 alloc_header->size = current->size;
                 alloc_header->magic = MAGIC;
-                
+
                 // Remove from free list
                 if (prev == NULL) {
                     // Removing head
@@ -354,17 +377,29 @@ void *umalloc(size_t size) {
                     // Removing from middle/end
                     prev->next = current->next;
                 }
-                
+
                 // Return pointer to payload
                 return (void *)((char *)alloc_header + sizeof(header_t));
             }
         }
-        
+
         // Move to next block
         prev = current;
         current = current->next;
+
+        // Wrap around to beginning if we reach the end
+        if (current == NULL && !wrapped) {
+            current = free_list;
+            prev = NULL;
+            wrapped = 1;
+        }
+
+        // Stop if we've come back to where we started
+        if (wrapped && current == start) {
+            break;
+        }
     }
-    
+
     // No suitable block found
     return NULL;
 }
